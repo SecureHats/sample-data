@@ -1,5 +1,4 @@
-#FortiGate
-
-Product: FortiGate-500E
-Records: 10.000
-Format: CSV
+| *Vendor* | *Device* | *Records* | *Format* |
+|-|-|-|-|
+FortiGate | FortiGate-500E | 10.000 | CSV
+FortiWeb | FortiWeb | 20.000 | CSV
