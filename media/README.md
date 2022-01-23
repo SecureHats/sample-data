@@ -1,1 +1,0 @@
-Images and media folder
