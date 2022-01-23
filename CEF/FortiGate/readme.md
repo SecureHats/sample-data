@@ -1,4 +1,5 @@
-https://www.fortinet.com/content/dam/fortinet/images/general/fortinet-logo.svg
+![logo](https://www.fortinet.com/content/dam/fortinet/images/general/fortinet-logo.svg)
+
 # FortiGate
 
 | *Vendor* | *Device* | *Records* | *Format* |
