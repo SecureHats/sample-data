@@ -1,0 +1,55 @@
+# This pipeline pushes the analytics rules to Azure Sentinel.
+# Maintenance on detections rules can be done by altering the code here.
+
+pr: none
+trigger:
+  branches:
+    include:
+    - Development
+    - master
+  paths:
+    include:
+    - analyticRules/*
+    - automationRules/*
+    - pipelines/cloudsiem-analytics.yml
+    - pipelines/templates/analytic-rules.yml
+    - sentinel/*
+
+variables:
+  serviceConnectionNamePrd: 'sub-gsotech-prd-isosecurity-01'
+  scriptSetWatchlists: 'scripts/Set-WatchLists.ps1'
+  scriptSetAnalyticRules: 'scripts/Set-AnalyticRules.ps1'
+  scriptSetAnalyticRuleAction: 'scripts/Set-AnalyticRuleAction.ps1'
+  analyticRulesFolder: 'analyticRules'
+  analyticRuleActionsFolder: 'automationRules'
+  sentinelInstancesFolder: 'sentinel'
+  repositoryRef: $[ resources.repositories.self.ref ]
+
+  doNotCreateUpdateRules: 'false'
+  removeNotDeployedRules: 'true'
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+stages:
+
+  - stage: azureSentinelPrdStage
+    condition: and(eq(variables.repositoryRef, 'refs/heads/master'), ne(variables['Build.Reason'], 'PullRequest'))
+    displayName: Azure Sentinel (Prd)
+    dependsOn: []
+    jobs:
+      - job: azureSentinelPrdJob
+        displayName: Azure Sentinel (Prd)
+        steps:
+        - template: templates/analytic-rules.yml
+          parameters:
+            serviceconnection_name: ${{ variables.serviceConnectionNamePrd }}
+            watchlistScript_location: ${{ variables.scriptSetWatchlists }}
+            analyticRulesScript_location: ${{ variables.scriptSetAnalyticRules }}
+            analyticRuleActionScript_location: ${{ variables.scriptSetAnalyticRuleAction }}
+            analyticRulesFolder: ${{ variables.analyticRulesFolder }}
+            analyticRuleActionsFolder: ${{ variables.analyticRuleActionsFolder }}
+            sentinelInstancesFolder: ${{ variables.sentinelInstancesFolder }}
+            fileExpression: $(FileExpressionPrd)
+            doNotCreateUpdateRules: $(DoNotCreateUpdateRules)
+            removeNotDeployedRules: $(RemoveNotDeployedRules)
