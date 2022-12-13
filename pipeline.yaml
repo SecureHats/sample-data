@@ -1,0 +1,283 @@
+# This pipeline will deploy the resources needed for Microsoft Sentinel Cloud-SIEM
+# but also components needed for creating a hybrid setups with RSA Netwitness
+# by leveraging Azure Logic Apps and Azure Event Hub
+
+name: $(Date:yyyyMMdd)-$(SourceBranchName)-$(Rev:rr)
+
+parameters:
+- name: env
+  displayName: Select deployment environment
+  type: string
+  default: nonprd-weeu
+  values:
+  - nonprd-weeu
+  - prd-weeu
+  - prd-cus
+  - prd-eas
+
+pr: none
+
+trigger: none
+
+variables:
+  scriptResourceProvider: 'scripts/Set-ResourceGroup.ps1'
+  scriptLogicApp: 'scripts/Set-LogicApp.ps1'
+
+  # Generic
+  repositoryRef: $[ resources.repositories.self.ref ]
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+stages:
+  - stage: Approval
+    displayName: Production Approval
+    condition: and(succeeded(), startsWith('${{ parameters.env }}', 'prd'))
+    variables:
+      - template: parameters/environment-variables-${{ parameters.env }}.yml
+
+    jobs:
+      - deployment: Production
+        environment: 'Production Change Approval'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+              - checkout: self
+              - script: |
+                  echo "The release has been approved!"
+                name: 'Approval'
+
+  - stage: MicrosoftSentinel
+    dependsOn:
+      - Approval
+    variables:
+      - template: parameters/environment-variables-${{ parameters.env }}.yml
+    # Or (Approval step was successful and not skipped and branch in main) or environment is nonprd
+    condition:  or(and(in(dependencies.Approval.result, 'Succeeded', 'SucceededWithIssues'), eq(variables['Build.SourceBranch'], 'refs/heads/master')), startsWith('${{ parameters.env }}', 'nonprd'))
+
+    displayName: 'Microsoft Sentinel "${{ parameters.env }}"'
+    jobs:
+      - job: azureSentinelWeUJob
+        displayName: 'Microsoft Sentinel'
+        steps:
+          # Retrieve Service Connection credentials
+          - template: templates/get-service-connection-credentials.yml
+            parameters:
+              serviceconnection_name: ${{ variables.serviceConnection }}
+
+          # Register Resource Providers and create Resource Group
+          - template: templates/prerequisites.yml
+            parameters:
+              deploymentName:                   'ResourceProvidersAndResourceGroupDeployment_${{ variables.location }}'
+              serviceconnection_name:           ${{ variables.serviceConnection }}
+              resourceProviderScript_location:  ${{ variables.scriptResourceProvider }}
+              subscriptionId:                   ${{ variables.subscriptionId }}
+              resourceGroupName:                ${{ variables.sentinelResourceGroup }}
+              location:                         ${{ variables.location }}
+
+          # Deploy Microsoft Sentinel Workspaces
+          - template: templates/sentinel-workspace.yml
+            parameters:
+              deploymentName:                 'DeployLogAnalyticsWorkspace_${{ variables.location }}'
+              serviceconnection_name:         ${{ variables.serviceConnection }}
+              subscriptionId:                 ${{ variables.subscriptionId }}
+              resourceGroupName:              ${{ variables.sentinelResourceGroup }}
+              location:                       ${{ variables.location }}
+              parameterLogAnalytics_location: ${{ variables.logAnalyticsParameters }}
+
+          # Deploy Storage Account (Weu)
+          - task: AzureResourceManagerTemplateDeployment@3
+            name: StorageAccountProd
+            displayName: 'Storage Account "${{ parameters.env }}"'
+            inputs:
+              deploymentScope:                'Resource Group'
+              azureResourceManagerConnection: ${{ variables.serviceConnection }}
+              subscriptionId:                 ${{ variables.subscriptionId }}
+              action:                         'Create Or Update Resource Group'
+              resourceGroupName:              ${{ variables.sentinelResourceGroup }}
+              location:                       ${{ variables.location }}
+              templateLocation:               'Linked artifact'
+              csmFile:                        'templates/storageAccount.json'
+              csmParametersFile:              ${{ variables.parameterStorageAccount }}
+              deploymentMode:                 'Incremental'
+
+  - stage: KeyVault
+    dependsOn:
+      - Approval
+        # Or (Approval step was successful and not skipped and branch in main) or environment is nonprd
+    condition:  or(and(in(dependencies.Approval.result, 'Succeeded', 'SucceededWithIssues'), eq(variables['Build.SourceBranch'], 'refs/heads/master')), startsWith('${{ parameters.env }}', 'nonprd'))
+    variables:
+      - template: parameters/environment-variables-${{ parameters.env }}.yml
+
+    displayName: 'Key Vault "${{ parameters.env }}"'
+    jobs:
+      - job: KeyVault
+        displayName: 'Key Vault'
+        steps:
+
+          # Deploy Key Vault (Weu)
+          - task: AzureResourceManagerTemplateDeployment@3
+            name: deployKeyVault
+            displayName: 'Deploy Key Vault "${{ parameters.env }}"'
+            inputs:
+              deploymentScope:                'Resource Group'
+              azureResourceManagerConnection: ${{ variables.serviceConnection }}
+              subscriptionId:                 ${{ variables.subscriptionId }}
+              action:                         'Create Or Update Resource Group'
+              resourceGroupName:              ${{ variables.sentinelResourceGroup }}
+              location:                       ${{ variables.location }}
+              templateLocation:               'Linked artifact'
+              csmFile:                        'templates/keyVault.json'
+              csmParametersFile:              ${{ variables.parameterKeyVault }}
+              deploymentMode:                 'Incremental'
+
+          # # Retrieve secrets (Weu)
+          # - task: AzureKeyVault@2
+          #   name: retrieveSecrets
+          #   displayName: 'Retrieve Key Vault secrets "${{ parameters.env }}"'
+          #   inputs:
+          #     azureSubscription: ${{ variables.serviceConnection }}
+          #     KeyVaultName: 'keyvault-${{ parameters.env }}-weu-01'
+          #     SecretsFilter: '*'
+
+  - stage: Workbooks
+    dependsOn:
+      - Approval
+    # Or (Approval step was successful and not skipped and branch in main) or environment is nonprd
+    condition:  or(and(in(dependencies.Approval.result, 'Succeeded', 'SucceededWithIssues'), eq(variables['Build.SourceBranch'], 'refs/heads/master')), startsWith('${{ parameters.env }}', 'nonprd'))
+    variables:
+      - template: parameters/environment-variables-${{ parameters.env }}.yml
+
+    displayName: ' Workbooks "${{ parameters.env }}"'
+    jobs:
+      - job: Workbooks
+        displayName: Workbooks
+        steps:
+          # Deploy Microsoft Sentinel Workbooks
+          - template: templates/workbooks-pipeline.yml
+            parameters:
+              serviceConnection:  ${{ variables.serviceConnection }}
+              subscriptionId:     ${{ variables.subscriptionId }}
+              resourceGroupName:  ${{ variables.sentinelResourceGroup }}
+              location:           ${{ variables.location }}
+              overrideParameters: '$(LogAnalyticsOutput.logAnalyticsResourceId)'
+              deploymentNames:    [
+                                    'ad-auditing',
+                                    'draft-ddo-sentinel-health',
+                                    'e-commerce-detections',
+                                    'gso-azure-sentinel-report',
+                                    'mitre-attack-and-statistics',
+                                    'sentinel-workspace-healthcheck-and-eventsource-health'
+                                  ]
+
+  - stage: LogicApps
+    dependsOn:
+      - Approval
+    # Or (Approval step was successful and not skipped and branch in main) or environment is nonprd
+    condition:  or(and(in(dependencies.Approval.result, 'Succeeded', 'SucceededWithIssues'), eq(variables['Build.SourceBranch'], 'refs/heads/master')), startsWith('${{ parameters.env }}', 'nonprd'))
+    variables:
+      - template: parameters/environment-variables-${{ parameters.env }}.yml
+
+    displayName: 'LogicApps "${{ parameters.env }}"'
+    jobs:
+      - job: LogicApps
+        displayName: Deploy Sentinel LogicApps
+        steps:
+          # Create Resource Group
+          - template: templates/resourcegroup-pipeline.yml
+            parameters:
+              serviceConnection:  ${{ variables.serviceConnection }}
+              subscriptionId:     ${{ variables.subscriptionId }}
+              location:           ${{ variables.location }}
+              deploymentNames:    [
+                                    '${{ variables.logicAppsResourceGroup }}'
+                                  ]
+
+          # Deploy Microsoft Sentinel LogicApps
+          - template: templates/logicapps-pipeline.yml
+            parameters:
+              serviceConnection:  ${{ variables.serviceConnection }}
+              resourceGroupName:  ${{ variables.logicAppsResourceGroup }}
+              deploymentNames:    [
+                                    'logic-defender-${{ parameters.env }}-gl-tagging-dc',
+                                    'logic-defender-${{ parameters.env }}-gl-tagging-region',
+                                    'logic-defender-${{ parameters.env }}-us-tagging-custom',
+                                    'logic-soar-${{ parameters.env }}-ad-mulesoft-notify',
+                                    'logic-soar-${{ parameters.env }}-ad-sql',
+                                    'logic-soar-${{ parameters.env }}-ad-0051',
+                                    'logic-soar-${{ parameters.env }}-hybris'
+                                  ]
+
+      - job: AssignPermissions
+        dependsOn:
+          - LogicApps
+        displayName: 'RBAC permissions'
+        steps:
+          # Assign Managed Identities permissions
+          - task: AzurePowerShell@5
+            name: AssignPermissions
+
+            inputs:
+              azureSubscription:      ${{ variables.serviceConnection }}
+              ScriptType:             'FilePath'
+              ScriptPath:             'scripts/Set-ManagedIdentititesPermissions.ps1'
+              ScriptArguments:        '-TargetResourceGroupName "${{ variables.sentinelResourceGroup }}"
+                                      -AzureRole "Microsoft Sentinel Responder"'
+
+              errorActionPreference:  'continue'
+              azurePowerShellVersion: 'LatestVersion'
+              pwsh: true
+
+  - stage: DataCollectionRules
+    dependsOn:
+      - Approval
+    # Or (Approval step was successful and not skipped and branch in main) or environment is nonprd
+    condition:  or(and(in(dependencies.Approval.result, 'Succeeded', 'SucceededWithIssues'), eq(variables['Build.SourceBranch'], 'refs/heads/master')), startsWith('${{ parameters.env }}', 'nonprd'))
+    variables:
+      - template: parameters/environment-variables-${{ parameters.env }}.yml
+
+    displayName: 'Data Collection Rules "${{ parameters.env }}"'
+    jobs:
+      - job: DataCollectionRules
+        displayName: Data Collection Rules
+        steps:
+          # Deploy Data Collection Rules (DCR) to leverage MMA agent and ingest logs into Sentinel
+          - template: templates/data-collection-rules-pipeline.yml
+            parameters:
+              serviceConnection:  ${{ variables.serviceConnection }}
+              subscriptionId:     ${{ variables.subscriptionId }}
+              resourceGroupName:  ${{ variables.dcrResourceGroup }}
+              location:           ${{ variables.location }}
+              deploymentNames:    [
+                                    'dcr-sent-${{ parameters.env }}-01-dbs',
+                                    'dcr-sent-${{ parameters.env }}-01-dbs',
+                                    'dcr-sent-${{ parameters.env }}-02-dbs',
+                                    'dcr-sent-${{ parameters.env }}-01-dns',
+                                    'dcr-sent-${{ parameters.env }}-01-fss',
+                                    'dcr-sent-${{ parameters.env }}-01-web'
+                                  ]
+
+  - stage: QueryPacks
+    dependsOn:
+      - Approval
+    # Or (Approval step was successful and not skipped and branch in main) or environment is nonprd
+    condition:  or(and(in(dependencies.Approval.result, 'Succeeded', 'SucceededWithIssues'), eq(variables['Build.SourceBranch'], 'refs/heads/master')), startsWith('${{ parameters.env }}', 'nonprd'))
+    variables:
+      - template: parameters/environment-variables-${{ parameters.env }}.yml
+
+    displayName: 'Query Packs "${{ parameters.env }}"'
+    jobs:
+      - job: QueryPacks
+        displayName: Deploy Query Packs
+        steps:
+          - template: templates/query-packs-pipeline.yml
+            parameters:
+              serviceConnection:  ${{ variables.serviceConnection }}
+              subscriptionId:     ${{ variables.subscriptionId }}
+              resourceGroupName:  ${{ variables.queryPackResourceGroup }}
+              location:           ${{ variables.location }}
+              deploymentNames:    [
+                                    'la-sentinel-querypack',
+                                    'la-sentinel-querypack-raytheon'
+                                  ]
